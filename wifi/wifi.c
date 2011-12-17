@@ -19,6 +19,9 @@
 #include <errno.h>
 #include <string.h>
 #include <dirent.h>
+#include <linux/if.h>
+#include <linux/wireless.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <poll.h>
 
@@ -53,13 +56,29 @@ static char iface[PROPERTY_VALUE_MAX];
 // TODO: use new ANDROID_SOCKET mechanism, once support for multiple
 // sockets is in
 
-#ifndef WIFI_DRIVER_MODULE_ARG
-#define WIFI_DRIVER_MODULE_ARG          ""
+#ifndef WIFI_DRIVER_MODULE_PATH
+#define WIFI_DRIVER_MODULE_PATH         "/system/lib/modules/wlan.ko"
 #endif
+
+#ifndef WIFI_DRIVER_MODULE_NAME
+#define WIFI_DRIVER_MODULE_NAME         "wlan"
+#endif
+
 #ifndef WIFI_FIRMWARE_LOADER
 #define WIFI_FIRMWARE_LOADER		""
 #endif
 #define WIFI_TEST_INTERFACE		"sta"
+
+#ifndef WIFI_SDIO_IF_DRIVER_MODULE_PATH
+#define WIFI_SDIO_IF_DRIVER_MODULE_PATH         ""
+#endif
+#ifndef WIFI_SDIO_IF_DRIVER_MODULE_NAME
+#define WIFI_SDIO_IF_DRIVER_MODULE_NAME ""
+#endif
+#ifndef WIFI_DRIVER_MODULE_ARG
+#define WIFI_SDIO_IF_DRIVER_MODULE_ARG  ""
+#define WIFI_DRIVER_MODULE_ARG          ""
+#endif
 
 #ifndef WIFI_DRIVER_FW_PATH_STA
 #define WIFI_DRIVER_FW_PATH_STA		NULL
@@ -89,13 +108,16 @@ static const char EXT_MODULE_PATH[] = WIFI_EXT_MODULE_PATH;
 
 #define WIFI_DRIVER_LOADER_DELAY	1000000
 
-static const char IFACE_DIR[]           = "/data/system/wpa_supplicant";
-#ifdef WIFI_DRIVER_MODULE_PATH
+static const char IFACE_DIR[]           = "/data/misc/wifi/wpa_supplicant";
+//#ifdef WIFI_DRIVER_MODULE_PATH
 static const char DRIVER_MODULE_NAME[]  = WIFI_DRIVER_MODULE_NAME;
+static const char DRIVER_SDIO_IF_MODULE_NAME[]  = WIFI_SDIO_IF_DRIVER_MODULE_NAME;
 static const char DRIVER_MODULE_TAG[]   = WIFI_DRIVER_MODULE_NAME " ";
 static const char DRIVER_MODULE_PATH[]  = WIFI_DRIVER_MODULE_PATH;
+static const char DRIVER_SDIO_IF_MODULE_PATH[]  = WIFI_SDIO_IF_DRIVER_MODULE_PATH;
 static const char DRIVER_MODULE_ARG[]   = WIFI_DRIVER_MODULE_ARG;
-#endif
+static const char DRIVER_SDIO_IF_MODULE_ARG[]   = WIFI_SDIO_IF_DRIVER_MODULE_ARG;
+//#endif
 static const char FIRMWARE_LOADER[]     = WIFI_FIRMWARE_LOADER;
 static const char DRIVER_PROP_NAME[]    = "wlan.driver.status";
 static const char SUPPLICANT_NAME[]     = "wpa_supplicant";
@@ -105,6 +127,10 @@ static const char SUPP_CONFIG_FILE[]    = "/data/misc/wifi/wpa_supplicant.conf";
 static const char P2P_CONFIG_FILE[]     = "/data/misc/wifi/p2p_supplicant.conf";
 static const char CONTROL_IFACE_PATH[]  = "/data/misc/wifi";
 static const char MODULE_FILE[]         = "/proc/modules";
+
+/* For Libra SDIO polling */
+static const char SDIO_POLLING_ON[]     = "/etc/init.qcom.sdio.sh 1";
+static const char SDIO_POLLING_OFF[]    = "/etc/init.qcom.sdio.sh 0";
 
 static const char SUPP_ENTROPY_FILE[]   = WIFI_ENTROPY_FILE;
 static unsigned char dummy_key[21] = { 0x02, 0x11, 0xbe, 0x33, 0x43, 0x35,
@@ -212,6 +238,7 @@ int wifi_load_driver()
 #ifdef WIFI_DRIVER_MODULE_PATH
     char driver_status[PROPERTY_VALUE_MAX];
     int count = 100; /* wait at most 20 seconds for completion */
+    int status = -1;
 
     if (is_wifi_driver_loaded()) {
         return 0;
@@ -229,6 +256,24 @@ int wifi_load_driver()
 #endif
         return -1;
 
+    property_set(DRIVER_PROP_NAME, "loading");
+
+    if(system(SDIO_POLLING_ON))
+        LOGW("Couldn't turn on SDIO polling: %s", SDIO_POLLING_ON);
+
+    if ('\0' != *DRIVER_SDIO_IF_MODULE_PATH) {
+       if (insmod(DRIVER_SDIO_IF_MODULE_PATH, DRIVER_SDIO_IF_MODULE_ARG) < 0) {
+           goto end;
+       }
+    }
+
+    if (insmod(DRIVER_MODULE_PATH, DRIVER_MODULE_ARG) < 0) {
+        if ('\0' != *DRIVER_SDIO_IF_MODULE_NAME) {
+           rmmod(DRIVER_SDIO_IF_MODULE_NAME);
+        }
+        goto end;
+    }
+
     if (strcmp(FIRMWARE_LOADER,"") == 0) {
         /* usleep(WIFI_DRIVER_LOADER_DELAY); */
         property_set(DRIVER_PROP_NAME, "ok");
@@ -243,7 +288,8 @@ int wifi_load_driver()
                 return 0;
             else if (strcmp(DRIVER_PROP_NAME, "failed") == 0) {
                 wifi_unload_driver();
-                return -1;
+                //return -1;
+		goto end;
             }
         }
         usleep(200000);
@@ -255,6 +301,11 @@ int wifi_load_driver()
     property_set(DRIVER_PROP_NAME, "ok");
     return 0;
 #endif
+
+end:
+    system(SDIO_POLLING_OFF);
+    //unlock(lock_id);
+    return status;
 }
 
 int wifi_unload_driver()
@@ -274,6 +325,11 @@ int wifi_unload_driver()
             if (rmmod(EXT_MODULE_NAME) == 0)
 #endif
             return 0;
+	}
+        if (count) {
+            if (rmmod(DRIVER_SDIO_IF_MODULE_NAME) == 0) {
+                return 0;
+            }
         }
         return -1;
     } else
